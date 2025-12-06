@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+scipy
+matplotlib
+fpdf    # optional for PDF export
