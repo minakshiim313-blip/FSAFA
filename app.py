@@ -1,14 +1,13 @@
 # app.py
 """
-Benford's Law Analyzer — Focused & Polished Streamlit App
-- First-digit Benford only (no extra unused options)
-- Minimal, clear UI: upload -> select columns -> analyze
-- Includes MAD + chi-square, chart, csv/pdf export, and a short AI-style explanation
+Benford's Law Analyzer — Focused & Corrected Streamlit App
+- First-digit Benford only (clean UI)
+- Safe .xlsx handling (openpyxl) message
+- Safe PDF export that handles Unicode by replacing unsupported chars
 Run:
     pip install -r requirements.txt
     streamlit run app.py
 """
-
 import math
 from collections import Counter
 from datetime import datetime
@@ -20,14 +19,14 @@ import pandas as pd
 import streamlit as st
 from scipy.stats import chisquare
 
-# Optional: PDF export
+# Optional: PDF export (fpdf). If not installed, PDF export is disabled.
 try:
     from fpdf import FPDF
     FPDF_AVAILABLE = True
 except Exception:
     FPDF_AVAILABLE = False
 
-# Page config & basic styling
+# Page config & minimal styling
 st.set_page_config(page_title="Benford's Law Analyzer", layout="wide")
 st.markdown(
     """
@@ -111,12 +110,11 @@ def generate_ai_explanation(col_name, stats_first):
     mad = stats_first.get("mad", np.nan)
     verdict, _ = nigrini_mad_verdict(mad)
     parts = [f"Column '{col_name}' — {verdict} (n={n}, MAD={mad:.4f})."]
-    # highlight top deviations
     if n and isinstance(stats_first.get("obs_freq", None), np.ndarray):
         obs = stats_first["obs_freq"]
         exp = stats_first["expected_prop"]
         diffs = obs - exp
-        over = np.where(diffs > 0.02)[0]  # >2% over expected
+        over = np.where(diffs > 0.02)[0]
         if len(over):
             bullets = []
             for i in over:
@@ -125,30 +123,63 @@ def generate_ai_explanation(col_name, stats_first):
     if verdict.startswith("Non-conforming"):
         parts.append("Recommendation: sample records with overrepresented leading digits and inspect for manual adjustments, rounding, or batch edits.")
     else:
-        parts.append("No immediate Benford red-flag. Combine with sampling and last-digit checks if concerned.")
+        parts.append("No immediate Benford red-flag. Consider sampling and contextual checks.")
     return " ".join(parts)
 
 
 def make_pdf_report(title, analyses):
+    """
+    Safe PDF exporter using fpdf.
+    Replaces unsupported characters when necessary to avoid UnicodeEncodeError.
+    Returns bytes or None if fpdf not available.
+    """
     if not FPDF_AVAILABLE:
         return None
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     pdf.set_font("Helvetica", size=16)
-    pdf.cell(0, 10, title, ln=True)
+    try:
+        pdf.cell(0, 10, title, ln=True)
+    except UnicodeEncodeError:
+        pdf.cell(0, 10, title.encode("latin-1", "replace").decode("latin-1"), ln=True)
     pdf.set_font("Helvetica", size=9)
-    pdf.cell(0, 6, f"Generated: {datetime.utcnow().isoformat()} UTC", ln=True)
+    try:
+        pdf.cell(0, 6, f"Generated: {datetime.utcnow().isoformat()} UTC", ln=True)
+    except UnicodeEncodeError:
+        pdf.cell(0, 6, f"Generated: {datetime.utcnow().isoformat()} UTC".encode("latin-1", "replace").decode("latin-1"), ln=True)
     pdf.ln(4)
+
     for a in analyses:
         pdf.set_font("Helvetica", size=12, style="B")
-        pdf.cell(0, 8, f"Column: {a['col']}", ln=True)
+        try:
+            pdf.cell(0, 8, f"Column: {a['col']}", ln=True)
+        except UnicodeEncodeError:
+            safe_col = a["col"].encode("latin-1", "replace").decode("latin-1")
+            pdf.cell(0, 8, f"Column: {safe_col}", ln=True)
         pdf.set_font("Helvetica", size=10)
-        pdf.multi_cell(0, 6, a["explanation"])
+        explanation = a.get("explanation", "")
+        try:
+            pdf.multi_cell(0, 6, explanation)
+        except UnicodeEncodeError:
+            safe_expl = explanation.encode("latin-1", "replace").decode("latin-1")
+            pdf.multi_cell(0, 6, safe_expl)
         stats = a["stats"]
-        pdf.cell(0, 6, f"Observations: {stats['n']}   MAD: {stats['mad']:.4f}   Chi2 p: {stats['p_value']:.4f}", ln=True)
+        try:
+            stats_line = f"Observations: {stats.get('n','NA')}   MAD: {stats.get('mad', float('nan')):.4f}   Chi2 p-value: {stats.get('p_value','NA')}"
+            pdf.cell(0, 6, stats_line, ln=True)
+        except UnicodeEncodeError:
+            safe_stats_line = stats_line.encode("latin-1", "replace").decode("latin-1")
+            pdf.cell(0, 6, safe_stats_line, ln=True)
         pdf.ln(4)
-    return pdf.output(dest="S").encode("latin-1")
+
+    # return bytes, encode defensively
+    try:
+        return pdf.output(dest="S").encode("latin-1")
+    except UnicodeEncodeError:
+        return pdf.output(dest="S").encode("latin-1", "replace")
+    except Exception:
+        return None
 
 
 def plot_first_digit(stats, ax=None):
@@ -173,7 +204,7 @@ def plot_first_digit(stats, ax=None):
 
 # ---------- UI ----------
 st.markdown("<h1>Benford's Law Analyzer — Prototype</h1>", unsafe_allow_html=True)
-st.markdown('<div class="header-sub small-muted">Upload financial transaction data (CSV or Excel). This tool performs a focused first-digit Benford analysis — a red-flag/triage test, not proof of fraud.</div>', unsafe_allow_html=True)
+st.markdown('<div class="header-sub small-muted">Upload transaction-level amounts (CSV or Excel). This performs a focused first-digit Benford analysis — a triage tool, not proof of fraud.</div>', unsafe_allow_html=True)
 st.write("")
 
 left_col, mid_col, right_col = st.columns([1, 1, 1.2])
@@ -186,7 +217,7 @@ with left_col:
     st.markdown("**Quick instructions**")
     st.markdown(
         """
-- Use transaction-level amounts (invoices, receipts, payments).  
+- Use transaction-level amounts (invoices, payments).  
 - Benford works best with **≥100 observations** and numbers spanning several orders of magnitude.  
 - Exclude IDs or assigned numbers; upload CSV if Excel reading fails.
 """
@@ -194,24 +225,22 @@ with left_col:
     with st.expander("Detailed notes"):
         st.markdown(
             """
-Benford checks the distribution of the *first significant digit* (1 appears ≈30% of the time, etc.).
-**Important:** Treat deviations as *signals* to investigate, not proof of fraud. Combine with sampling and context knowledge.
+Benford checks the distribution of the *first significant digit* (1 ≈30%). Treat deviations as signals to investigate, not proof of fraud.
 """
         )
     st.markdown("</div>", unsafe_allow_html=True)
 
-# Mid: options (minimal)
+# Mid: minimal options
 with mid_col:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### Analysis options")
     exclude_zeros = st.checkbox("Exclude zeros (recommended)", value=True, key="exclude_zeros")
     exclude_negatives = st.checkbox("Exclude negative values", value=False, key="exclude_negatives")
     st.write("")
-    st.markdown("**Sample guidance**")
-    st.markdown("<div class='small-muted'>Results become meaningful with sample size ≥100. Small samples may be unreliable.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='small-muted'>Results are meaningful with sample size ≥100. Small samples are less reliable.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# Right: results area (placeholder)
+# Right: results placeholder
 with right_col:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### Results")
@@ -228,7 +257,7 @@ if uploaded:
             try:
                 df = pd.read_excel(uploaded, engine="openpyxl")
             except ImportError:
-                st.error("Reading .xlsx requires the 'openpyxl' package. Add it to requirements or upload CSV.")
+                st.error("Reading .xlsx requires the 'openpyxl' package. Add it to requirements.txt or upload a CSV.")
             except Exception:
                 try:
                     df = pd.read_excel(uploaded)
@@ -241,7 +270,6 @@ if df is not None:
     # detect numeric columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if not numeric_cols:
-        # try coercion once
         coerced = []
         for c in df.columns:
             coerced_col = pd.to_numeric(df[c], errors="coerce")
@@ -250,7 +278,6 @@ if df is not None:
                 df[c] = coerced_col
         numeric_cols = coerced
 
-    # monetary suggestions (simple heuristic)
     patterns = ["amount", "amt", "invoice", "sale", "revenue", "total", "balance", "price"]
     monetary_suggestions = [c for c in numeric_cols if any(p in c.lower() for p in patterns)]
 
@@ -264,14 +291,14 @@ if df is not None:
                 pct_zero = (col_ser == 0).sum() / max(1, col_ser.count()) * 100
                 st.write(f"- **{c}** — {col_ser.count()} values, {pct_zero:.1f}% zeros {'(suggested)' if c in monetary_suggestions else ''}")
         else:
-            st.warning("No numeric columns detected. Ensure amounts are numeric, or try uploading a CSV.")
+            st.warning("No numeric columns detected. Ensure amounts are numeric, or upload a CSV.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     # selection & run button in middle
     with mid_col:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        chosen = st.multiselect("Select column(s) to analyze", options=numeric_cols, default=monetary_suggestions[:1] if monetary_suggestions else (numeric_cols[:1] if numeric_cols else []), key="chosen_cols")
-        run = st.button("Run Benford analysis", type="primary", key="run_benford")
+        chosen = st.multiselect("Select column(s) to analyze", options=numeric_cols, default=monetary_suggestions[:1] if monetary_suggestions else (numeric_cols[:1] if numeric_cols else []), key=f"chosen_cols_{uploaded.name}")
+        run = st.button("Run Benford analysis", type="primary", key=f"run_benford_{uploaded.name}")
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Run analysis when clicked
@@ -280,7 +307,6 @@ if df is not None:
             st.warning("Choose at least one numeric column to analyze.")
         else:
             analyses = []
-            # build results display
             with result_area.container():
                 for col in chosen:
                     st.markdown(f"#### {col}")
@@ -291,20 +317,19 @@ if df is not None:
                         series = series[series >= 0]
                     stats = compute_first_digit_stats(series)
 
-                    # show sample size warning
                     if stats["n"] < 50:
                         st.warning(f"Only {stats['n']} usable observations for '{col}'. Benford less reliable for small samples.")
-                    # verdict badge
+
                     verdict, color = nigrini_mad_verdict(stats.get("mad", np.nan))
                     badge_class = {"green": "badge-green", "orange": "badge-orange", "red": "badge-red", "gray": "badge-gray"}[color]
-                    st.markdown(f"<div style='display:flex; gap:12px; align-items:center'><div class='{badge_class}'>{verdict}</div><div class='small-muted'>n = {stats['n']} &nbsp;&nbsp; MAD = {stats['mad']:.5f} &nbsp;&nbsp; Chi2 p = {stats['p_value']:.4f}</div></div>", unsafe_allow_html=True)
+                    pval_display = f"{stats['p_value']:.4f}" if (not np.isnan(stats.get("p_value", np.nan))) else "NA"
+                    mad_display = f"{stats['mad']:.5f}" if (not np.isnan(stats.get("mad", np.nan))) else "NA"
+                    st.markdown(f"<div style='display:flex; gap:12px; align-items:center'><div class='{badge_class}'>{verdict}</div><div class='small-muted'>n = {stats['n']} &nbsp;&nbsp; MAD = {mad_display} &nbsp;&nbsp; Chi2 p = {pval_display}</div></div>", unsafe_allow_html=True)
 
-                    # plot
                     fig, ax = plt.subplots(figsize=(7, 2.6))
                     plot_first_digit(stats, ax=ax)
                     st.pyplot(fig)
 
-                    # table
                     table = pd.DataFrame({
                         "digit": list(range(1, 10)),
                         "observed_count": stats["counts"],
@@ -314,7 +339,6 @@ if df is not None:
                     })
                     st.dataframe(table.style.format({"observed_freq": "{:.4f}", "expected_freq": "{:.4f}", "expected_count": "{:.1f}"}), height=220)
 
-                    # AI-style explanation
                     explanation = generate_ai_explanation(col, stats)
                     st.markdown(f"**Interpretation**: {explanation}")
 
@@ -323,7 +347,6 @@ if df is not None:
 
                 # Exports
                 st.markdown("### Exports")
-                # build CSV rows
                 rows = []
                 for a in analyses:
                     s = a["stats"]
