@@ -3,7 +3,7 @@
 Benford's Law Analyzer — Focused & Corrected Streamlit App
 - First-digit Benford only (clean UI)
 - Safe .xlsx handling (openpyxl) message
-- Safe PDF export that handles Unicode by replacing unsupported chars
+- Defensive PDF export: any PDF errors are caught so app doesn't crash
 Run:
     pip install -r requirements.txt
     streamlit run app.py
@@ -129,56 +129,66 @@ def generate_ai_explanation(col_name, stats_first):
 
 def make_pdf_report(title, analyses):
     """
-    Safe PDF exporter using fpdf.
-    Replaces unsupported characters when necessary to avoid UnicodeEncodeError.
-    Returns bytes or None if fpdf not available.
+    Defensive PDF exporter using fpdf.
+    Any exception during PDF creation is caught and causes the function to return None,
+    so the calling code can gracefully fall back to CSV-only.
     """
     if not FPDF_AVAILABLE:
         return None
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=12)
-    pdf.add_page()
-    pdf.set_font("Helvetica", size=16)
     try:
-        pdf.cell(0, 10, title, ln=True)
-    except UnicodeEncodeError:
-        pdf.cell(0, 10, title.encode("latin-1", "replace").decode("latin-1"), ln=True)
-    pdf.set_font("Helvetica", size=9)
-    try:
-        pdf.cell(0, 6, f"Generated: {datetime.utcnow().isoformat()} UTC", ln=True)
-    except UnicodeEncodeError:
-        pdf.cell(0, 6, f"Generated: {datetime.utcnow().isoformat()} UTC".encode("latin-1", "replace").decode("latin-1"), ln=True)
-    pdf.ln(4)
-
-    for a in analyses:
-        pdf.set_font("Helvetica", size=12, style="B")
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=12)
+        pdf.add_page()
+        pdf.set_font("Helvetica", size=16)
+        # write header
         try:
-            pdf.cell(0, 8, f"Column: {a['col']}", ln=True)
-        except UnicodeEncodeError:
-            safe_col = a["col"].encode("latin-1", "replace").decode("latin-1")
-            pdf.cell(0, 8, f"Column: {safe_col}", ln=True)
-        pdf.set_font("Helvetica", size=10)
-        explanation = a.get("explanation", "")
+            pdf.cell(0, 10, title, ln=True)
+        except Exception:
+            pdf.cell(0, 10, (title.encode("latin-1", "replace").decode("latin-1")), ln=True)
+        pdf.set_font("Helvetica", size=9)
         try:
-            pdf.multi_cell(0, 6, explanation)
-        except UnicodeEncodeError:
-            safe_expl = explanation.encode("latin-1", "replace").decode("latin-1")
-            pdf.multi_cell(0, 6, safe_expl)
-        stats = a["stats"]
-        try:
-            stats_line = f"Observations: {stats.get('n','NA')}   MAD: {stats.get('mad', float('nan')):.4f}   Chi2 p-value: {stats.get('p_value','NA')}"
-            pdf.cell(0, 6, stats_line, ln=True)
-        except UnicodeEncodeError:
-            safe_stats_line = stats_line.encode("latin-1", "replace").decode("latin-1")
-            pdf.cell(0, 6, safe_stats_line, ln=True)
+            pdf.cell(0, 6, f"Generated: {datetime.utcnow().isoformat()} UTC", ln=True)
+        except Exception:
+            pdf.cell(0, 6, f"Generated: {datetime.utcnow().isoformat()} UTC".encode("latin-1", "replace").decode("latin-1"), ln=True)
         pdf.ln(4)
 
-    # return bytes, encode defensively
-    try:
-        return pdf.output(dest="S").encode("latin-1")
-    except UnicodeEncodeError:
-        return pdf.output(dest="S").encode("latin-1", "replace")
+        for a in analyses:
+            pdf.set_font("Helvetica", size=12, style="B")
+            try:
+                pdf.cell(0, 8, f"Column: {a['col']}", ln=True)
+            except Exception:
+                pdf.cell(0, 8, (str(a["col"]).encode("latin-1", "replace").decode("latin-1")), ln=True)
+            pdf.set_font("Helvetica", size=10)
+            explanation = a.get("explanation", "")
+            try:
+                pdf.multi_cell(0, 6, explanation)
+            except Exception:
+                pdf.multi_cell(0, 6, explanation.encode("latin-1", "replace").decode("latin-1"))
+            stats = a["stats"]
+            try:
+                stats_line = f"Observations: {stats.get('n','NA')}   MAD: {stats.get('mad', float('nan')):.4f}   Chi2 p-value: {stats.get('p_value','NA')}"
+                pdf.cell(0, 6, stats_line, ln=True)
+            except Exception:
+                pdf.cell(0, 6, stats_line.encode("latin-1", "replace").decode("latin-1"), ln=True)
+            pdf.ln(4)
+
+        # try to get bytes; wrap in try/except because fpdf may raise inside output
+        try:
+            out = pdf.output(dest="S")
+            # if it's str (some versions), encode defensively
+            if isinstance(out, str):
+                try:
+                    return out.encode("latin-1")
+                except Exception:
+                    return out.encode("latin-1", "replace")
+            else:
+                # already bytes
+                return out
+        except Exception:
+            # any failure in fpdf internals -> return None to avoid crashing the app
+            return None
     except Exception:
+        # top-level defensive catch
         return None
 
 
@@ -364,10 +374,14 @@ if df is not None:
                 out_df = pd.DataFrame(rows)
                 csv_bytes = out_df.to_csv(index=False).encode("utf-8")
                 st.download_button("Download results CSV", data=csv_bytes, file_name="benford_results.csv", mime="text/csv")
+
+                # Defensive PDF export call: wrap and handle None
                 if FPDF_AVAILABLE:
                     pdf_bytes = make_pdf_report("Benford Analysis Report", analyses)
                     if pdf_bytes:
                         st.download_button("Download PDF report", data=pdf_bytes, file_name="benford_report.pdf", mime="application/pdf")
+                    else:
+                        st.info("PDF generation failed (unsupported characters or internal PDF error). CSV export is available.")
                 else:
                     st.info("PDF export not installed. Add 'fpdf' to requirements to enable PDF report.")
 
